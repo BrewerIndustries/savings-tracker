@@ -1,0 +1,9 @@
+{
+  "id": "savings",
+  "name": "Savings Goals",
+  "category": "standalone",
+  "description": "Track savings toward specific goals — a thermometer per goal, dated contribution history, pace-based finish projections, deadline on-track indicators, and one-move lump-sum (waterfall) allocation across goals.",
+  "tech": ["Next.js 16", "React 19", "TypeScript", "Tailwind CSS v4", "SQLite (better-sqlite3)"],
+  "status": { "prod": "in_progress", "dev": "live" },
+  "deploy": { "prod": { "port": 4740 }, "dev": { "port": 4750 } }
+}

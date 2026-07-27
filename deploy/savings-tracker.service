@@ -1,0 +1,18 @@
+[Unit]
+Description=Savings Goals (Next.js)
+After=network.target
+
+[Service]
+Type=simple
+User=dan
+WorkingDirectory=/opt/savings-tracker
+Environment=NODE_ENV=production
+Environment=PORT=4740
+# Real secrets (JARVIS_TOKEN) live in /opt/savings-tracker/.env:
+EnvironmentFile=/opt/savings-tracker/.env
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
