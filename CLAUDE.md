@@ -5,12 +5,21 @@ Personal savings-goal tracker. Next.js 16 (App Router) + React 19 + Tailwind v4 
 app family under `~/Desktop/Jarvis Server Applications/`.
 
 ## Model
-- **Goal** → many **Contributions**. Flat list of goals; each owns a dated deposit log.
+- **Goal** → sub-**Goals** (tree, unlimited depth via `parent_id`) → **Contributions**.
+  Top-level goals have `parentId: null`. Deposits land ONLY on leaf goals; the API rejects
+  deposits to a parent (`addContribution` → `has_children`).
+- **Rollup:** a node's `savedCents` = its own + all descendant deposits; effective
+  `targetCents` = Σ children targets when it has children, else its stored `ownTargetCents`;
+  `contributions` on a node = own + descendants flattened (so pace & projection roll up).
+  All computed in `listGoals()` (`src/lib/db.ts`) — nothing extra stored.
 - **Money is integer CENTS everywhere** in the DB + lib. Convert at the UI edge only
   (`dollarsToCents` / `formatMoney` in `src/lib/types.ts`). Never store dollars/floats.
-- `savedCents` on a Goal is *derived* (sum of contributions) in `listGoals()`, not stored.
 - Progress / pace / projection / deadline health all come from `computeStats(goal, now)`
-  in `src/lib/types.ts` — pure + `now`-injected so it runs the same on server + client.
+  in `src/lib/types.ts` — pure + `now`-injected so it runs the same on server + client, and
+  works unchanged for leaves and parents (reads effective target + rolled contributions).
+- UI: `GoalNode` in `SavingsBoard.tsx` is recursive — parents show a rollup thermometer +
+  "Add sub-goal" and NO deposit box; leaves show the deposit box + history. Waterfall
+  `computeSplit` runs over `leafGoals()`.
 
 ## Key files
 - `src/lib/db.ts` — schema + CRUD + `applyAllocation()` (atomic multi-goal write).
