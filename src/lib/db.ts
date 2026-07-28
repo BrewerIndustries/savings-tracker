@@ -245,6 +245,25 @@ export function updateGoal(id: string, patch: GoalInput): boolean {
   return true;
 }
 
+/**
+ * Reorder a sibling group. `orderedIds` is the new order of the goals directly
+ * under `parentId` (null = top level). Positions are rewritten 0..n-1 in one
+ * transaction; the `parent_id IS @pid` guard means only true siblings move, so a
+ * stale/forged id from another group can't be repositioned here.
+ */
+export function reorderGoals(parentId: string | null, orderedIds: string[]): boolean {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const upd = db.prepare(
+    `UPDATE goals SET position = @pos, updatedAt = @now WHERE id = @id AND parent_id IS @pid`,
+  );
+  const tx = db.transaction((ids: string[]) => {
+    ids.forEach((id, i) => upd.run({ id, pos: i, now, pid: parentId }));
+  });
+  tx(orderedIds.filter((s) => typeof s === "string" && s));
+  return true;
+}
+
 /** Delete a goal and its entire subtree (contributions cascade per subtree). */
 export function deleteGoal(id: string): boolean {
   const db = getDb();

@@ -18,6 +18,13 @@ Next.js 16 + `better-sqlite3` shape, token-gated writes, dev/prod systemd units.
   progress auto-sum from its children** (its thermometer rolls up), and deposits
   always land in a specific leaf goal — never the parent. Pace, projection, and
   deadline health roll up too. Waterfall allocation fills the leaf goals.
+- **Drag to reorder** — grab the ⠿ handle to reorder top-level goals or sub-goals
+  within their parent (mouse, touch, or keyboard via `@dnd-kit`). Order persists to
+  each goal's `position` (`POST /api/reorder`, atomic per sibling group). Reordering
+  is scoped to a sibling group — a drag never re-parents a goal.
+- **Scrollable cards** — a goal's sub-goals list (and its deposit history) scroll
+  inside the card past a max height, so a goal with many sub-goals stays compact
+  instead of ballooning the page.
 - **Contributions** — every deposit is a *dated* row (withdrawals allowed via
   negative amounts), so you keep a full history you can expand and prune per goal.
 - **Projected finish** — from your average pace since the first deposit, the card

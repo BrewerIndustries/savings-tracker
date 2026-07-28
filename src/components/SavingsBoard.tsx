@@ -2,6 +2,24 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  DndContext,
+  type DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  rectSortingStrategy,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
   ACCENT,
   ACCENT_KEYS,
   type AccentKey,
@@ -98,6 +116,26 @@ function computeSplit(cents: number, leaves: Goal[], strategy: Strategy): SplitR
 
   const lines = [...alloc.entries()].filter(([, c]) => c > 0).map(([goalId, c]) => ({ goalId, cents: c }));
   return { lines, unallocated: Math.max(0, left) };
+}
+
+/** Return a new tree with one sibling group (`scope`, null = top level) reordered. */
+function reorderInTree(goals: Goal[], scope: string | null, orderedIds: string[]): Goal[] {
+  const applyOrder = (list: Goal[]): Goal[] => {
+    const map = new Map(list.map((g) => [g.id, g]));
+    const next = orderedIds.map((id) => map.get(id)).filter((g): g is Goal => Boolean(g));
+    for (const g of list) if (!orderedIds.includes(g.id)) next.push(g); // safety: keep strays
+    return next;
+  };
+  if (scope === null) return applyOrder(goals);
+  const walk = (list: Goal[]): Goal[] =>
+    list.map((g) =>
+      g.id === scope
+        ? { ...g, children: applyOrder(g.children) }
+        : g.hasChildren
+          ? { ...g, children: walk(g.children) }
+          : g,
+    );
+  return walk(goals);
 }
 
 // ============================================================================
@@ -218,6 +256,54 @@ export default function SavingsBoard() {
       await load();
     },
     [authHeaders, guard, load],
+  );
+
+  // --- drag reorder (top-level goals + sub-goals within a parent) ---
+  const sensors = useSensors(
+    // a little travel before a drag starts, so taps on buttons/inputs still click
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  // id → parentId, and parentId(null=top) → ordered sibling id list.
+  const { parentOf, siblingsOf } = useMemo(() => {
+    const flat = flattenGoals(goals);
+    const parent = new Map<string, string | null>(flat.map((g) => [g.id, g.parentId]));
+    const sibs = new Map<string | null, string[]>();
+    sibs.set(null, goals.map((g) => g.id));
+    for (const g of flat) if (g.hasChildren) sibs.set(g.id, g.children.map((c) => c.id));
+    return { parentOf: parent, siblingsOf: sibs };
+  }, [goals]);
+
+  const onDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event;
+      if (!over || active.id === over.id) return;
+      const aId = String(active.id);
+      const oId = String(over.id);
+      // Only reorder within the same sibling group (no re-parenting via drag).
+      const scope = parentOf.get(aId) ?? null;
+      if ((parentOf.get(oId) ?? null) !== scope) return;
+      const siblings = siblingsOf.get(scope) ?? [];
+      const from = siblings.indexOf(aId);
+      const to = siblings.indexOf(oId);
+      if (from < 0 || to < 0) return;
+      const orderedIds = arrayMove(siblings, from, to);
+
+      // Optimistic: reorder the group in local state for an instant response…
+      setGoals((prev) => reorderInTree(prev, scope, orderedIds));
+      // …then persist + reconcile.
+      (async () => {
+        const res = await fetch("/api/reorder", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ parentId: scope, orderedIds }),
+        });
+        if (!guard(res)) { await load(); return; } // 401 / error → snap back to server truth
+        await load();
+      })();
+    },
+    [authHeaders, guard, load, parentOf, siblingsOf],
   );
 
   // --- overall totals (top-level nodes already roll up their descendants) ---
@@ -350,20 +436,24 @@ export default function SavingsBoard() {
           No goals yet. Click <strong>“+ New goal”</strong> to add your first one.
         </div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 items-start">
-          {goals.map((g) => (
-            <GoalNode
-              key={g.id}
-              goal={g}
-              depth={0}
-              onDeposit={addContribution}
-              onDeleteContribution={deleteContribution}
-              onEdit={(goal) => setEditing(goal)}
-              onDelete={removeGoal}
-              onAddSub={(parent) => setEditing({ parent })}
-            />
-          ))}
-        </div>
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+          <SortableContext items={goals.map((g) => g.id)} strategy={rectSortingStrategy}>
+            <div className="grid gap-4 sm:grid-cols-2 items-start">
+              {goals.map((g) => (
+                <GoalNode
+                  key={g.id}
+                  goal={g}
+                  depth={0}
+                  onDeposit={addContribution}
+                  onDeleteContribution={deleteContribution}
+                  onEdit={(goal) => setEditing(goal)}
+                  onDelete={removeGoal}
+                  onAddSub={(parent) => setEditing({ parent })}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
       )}
 
       {tokenRequired && !token && (
@@ -438,6 +528,8 @@ function GoalNode(props: NodeProps) {
   const [showHistory, setShowHistory] = useState(false);
   const [menu, setMenu] = useState(false);
 
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: goal.id });
+
   const submitDeposit = () => {
     const cents = dollarsToCents(amount);
     if (cents === null || cents === 0) return;
@@ -451,11 +543,31 @@ function GoalNode(props: NodeProps) {
 
   return (
     <div
+      ref={setNodeRef}
       className={`rounded-2xl border p-4 ${stats.complete ? "just-complete" : ""}`}
-      style={{ borderColor: acc.border, background: acc.tile }}
+      style={{
+        borderColor: acc.border,
+        background: acc.tile,
+        transform: CSS.Transform.toString(transform),
+        transition,
+        opacity: isDragging ? 0.5 : 1,
+        zIndex: isDragging ? 30 : undefined,
+        position: isDragging ? "relative" : undefined,
+      }}
     >
       {/* header */}
       <div className="flex items-start gap-2">
+        <button
+          type="button"
+          {...attributes}
+          {...listeners}
+          className="mt-0.5 -ml-1 px-1 text-lg leading-none cursor-grab active:cursor-grabbing touch-none select-none"
+          style={{ color: acc.fg, opacity: 0.4 }}
+          aria-label={`Drag to reorder ${goal.name}`}
+          title="Drag to reorder"
+        >
+          ⠿
+        </button>
         <div className="text-2xl leading-none mt-0.5">{goal.icon}</div>
         <div className="flex-1 min-w-0">
           <div className="font-bold truncate flex items-center gap-1.5" style={{ color: acc.fg }}>
@@ -569,7 +681,7 @@ function GoalNode(props: NodeProps) {
             </button>
           )}
           {showHistory && (
-            <ul className="mt-2 space-y-1">
+            <ul className="mt-2 space-y-1 overflow-y-auto pr-1" style={{ maxHeight: 200 }}>
               {history.map((c) => (
                 <li key={c.id} className="flex items-center justify-between text-xs bg-white/60 rounded-md px-2 py-1">
                   <span style={{ color: acc.fg }}>
@@ -585,15 +697,17 @@ function GoalNode(props: NodeProps) {
         </>
       )}
 
-      {/* sub-goals (recursive) */}
+      {/* sub-goals (recursive, drag-sortable within this parent, scrolls when long) */}
       {isParent && (
         <div
-          className="mt-3 pl-3 space-y-3"
-          style={{ borderLeft: `2px solid ${acc.border}` }}
+          className="mt-3 pl-3 space-y-3 overflow-y-auto"
+          style={{ borderLeft: `2px solid ${acc.border}`, maxHeight: depth === 0 ? 460 : 320 }}
         >
-          {goal.children.map((child) => (
-            <GoalNode key={child.id} {...props} goal={child} depth={depth + 1} />
-          ))}
+          <SortableContext items={goal.children.map((c) => c.id)} strategy={verticalListSortingStrategy}>
+            {goal.children.map((child) => (
+              <GoalNode key={child.id} {...props} goal={child} depth={depth + 1} />
+            ))}
+          </SortableContext>
         </div>
       )}
     </div>
