@@ -6,6 +6,12 @@ set -euo pipefail
 
 cd /opt/savings-tracker-dev
 
+# `npm install` on the Linux server regenerates package-lock.json differently
+# from the committed macOS-generated one, leaving the working tree dirty and
+# blocking a fast-forward pull. Discard that churn first (safe: it's rebuilt by
+# the install step below).
+git checkout -- package-lock.json 2>/dev/null || true
+
 echo "→ fetching latest dev…"
 git pull --ff-only
 
