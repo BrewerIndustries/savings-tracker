@@ -60,14 +60,36 @@ export interface Goal {
   name: string;
   icon: string; // emoji
   accent: AccentKey;
-  targetCents: number;
+  parentId: string | null; // null = top-level goal; else nests under that goal
+  ownTargetCents: number; // the target stored on THIS goal (meaningful for leaves)
+  targetCents: number; // EFFECTIVE target — rolled up (sum of children) when it has any
   deadline: string | null; // ISO date (YYYY-MM-DD) or null for open-ended
   note: string;
-  position: number; // ordering + waterfall priority (lower = funded first)
+  position: number; // ordering + waterfall priority among siblings (lower = first)
   createdAt: string;
   updatedAt: string;
+  // For a leaf: its own deposits. For a parent: all descendant deposits flattened
+  // (so pace/projection roll up). Sum of these always equals savedCents.
   contributions: Contribution[];
-  savedCents: number; // derived: sum of contribution cents (never below 0 display)
+  savedCents: number; // derived rollup: sum of contribution cents (clamped ≥ 0)
+  children: Goal[]; // nested sub-goals (empty for a leaf)
+  hasChildren: boolean; // convenience: children.length > 0 (a parent holds no direct deposits)
+}
+
+/** Depth-first flatten of a goal forest into a single ordered list. */
+export function flattenGoals(goals: Goal[]): Goal[] {
+  const out: Goal[] = [];
+  const walk = (g: Goal) => {
+    out.push(g);
+    g.children.forEach(walk);
+  };
+  goals.forEach(walk);
+  return out;
+}
+
+/** Every leaf (deposit-holding) goal under a forest, in depth-first order. */
+export function leafGoals(goals: Goal[]): Goal[] {
+  return flattenGoals(goals).filter((g) => !g.hasChildren);
 }
 
 // ---- formatting -------------------------------------------------------------

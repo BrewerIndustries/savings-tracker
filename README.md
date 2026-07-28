@@ -13,6 +13,11 @@ Next.js 16 + `better-sqlite3` shape, token-gated writes, dev/prod systemd units.
 - **Goals** — name, emoji, colour, target amount, optional deadline, note. Each
   goal is a card fronted by a horizontal thermometer; the whole portfolio gets a
   big vertical thermometer at the top.
+- **Sub-goals (unlimited nesting)** — any goal can hold sub-goals (e.g. *House
+  Fund* → *Down Payment* / *Furniture* / *Moving*). A parent's **target and
+  progress auto-sum from its children** (its thermometer rolls up), and deposits
+  always land in a specific leaf goal — never the parent. Pace, projection, and
+  deadline health roll up too. Waterfall allocation fills the leaf goals.
 - **Contributions** — every deposit is a *dated* row (withdrawals allowed via
   negative amounts), so you keep a full history you can expand and prune per goal.
 - **Projected finish** — from your average pace since the first deposit, the card

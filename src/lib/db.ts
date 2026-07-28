@@ -41,6 +41,15 @@ function init(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_contrib_goal ON contributions(goal_id);
   `);
 
+  // Migration: sub-goals. Add a self-referential parent_id (null = top-level).
+  // (SQLite can't add a column with a REFERENCES action via ALTER, so subtree
+  // deletion is handled recursively in code, not by an FK cascade.)
+  const cols = db.prepare(`PRAGMA table_info(goals)`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === "parent_id")) {
+    db.exec(`ALTER TABLE goals ADD COLUMN parent_id TEXT`);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_goals_parent ON goals(parent_id)`);
+
   // Seed a couple of example goals on a brand-new database so a fresh deploy
   // looks alive instead of an empty screen. Editable/deletable like anything else.
   const { n } = db.prepare(`SELECT COUNT(*) AS n FROM goals`).get() as { n: number };
@@ -71,10 +80,14 @@ function isoDateOrNull(v: unknown): string | null {
   const s = trimmed(v);
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
 }
-function nextGoalPosition(): number {
+/** Next sibling position within a parent scope (null scope = top level). */
+function nextGoalPosition(parentId: string | null): number {
   const row = getDb()
-    .prepare(`SELECT COALESCE(MAX(position), -1) + 1 AS pos FROM goals`)
-    .get() as { pos: number };
+    .prepare(
+      `SELECT COALESCE(MAX(position), -1) + 1 AS pos FROM goals
+       WHERE parent_id IS @pid`,
+    )
+    .get({ pid: parentId }) as { pos: number };
   return row.pos;
 }
 
@@ -83,7 +96,7 @@ function nextGoalPosition(): number {
 interface GoalRow {
   id: string; name: string; icon: string; accent: string; targetCents: number;
   deadline: string | null; note: string; position: number;
-  createdAt: string; updatedAt: string;
+  createdAt: string; updatedAt: string; parent_id: string | null;
 }
 interface ContribRow {
   id: string; goal_id: string; cents: number; note: string;
@@ -97,7 +110,7 @@ function toContribution(r: ContribRow): Contribution {
   };
 }
 
-// --- read (goals + nested contributions + derived savedCents) ----------------
+// --- read (build the goal tree with rolled-up totals) ------------------------
 
 export function listGoals(): Goal[] {
   const db = getDb();
@@ -106,61 +119,111 @@ export function listGoals(): Goal[] {
     .prepare(`SELECT * FROM contributions ORDER BY occurredAt, createdAt`)
     .all() as ContribRow[];
 
-  const byGoal = new Map<string, Contribution[]>();
-  const savedByGoal = new Map<string, number>();
+  const ownContribs = new Map<string, Contribution[]>();
   for (const c of contribs) {
-    const list = byGoal.get(c.goal_id) ?? [];
+    const list = ownContribs.get(c.goal_id) ?? [];
     list.push(toContribution(c));
-    byGoal.set(c.goal_id, list);
-    savedByGoal.set(c.goal_id, (savedByGoal.get(c.goal_id) ?? 0) + c.cents);
+    ownContribs.set(c.goal_id, list);
   }
 
-  return goals.map((g) => ({
-    id: g.id, name: g.name, icon: g.icon, accent: accentOf(g.accent),
-    targetCents: g.targetCents, deadline: g.deadline, note: g.note,
-    position: g.position, createdAt: g.createdAt, updatedAt: g.updatedAt,
-    contributions: byGoal.get(g.id) ?? [],
-    savedCents: Math.max(0, savedByGoal.get(g.id) ?? 0),
-  }));
+  const childrenOf = new Map<string | null, GoalRow[]>();
+  for (const g of goals) {
+    const key = g.parent_id ?? null;
+    const list = childrenOf.get(key) ?? [];
+    list.push(g);
+    childrenOf.set(key, list);
+  }
+
+  // Recursively build a node: effective target + saved + flattened deposits roll
+  // up from descendants. A node with children holds no *direct* deposits in the
+  // usual case, but any it does have are still counted (never lost).
+  const build = (row: GoalRow): Goal => {
+    const kids = (childrenOf.get(row.id) ?? []).map(build);
+    const own = ownContribs.get(row.id) ?? [];
+    const hasChildren = kids.length > 0;
+
+    // Flatten this node's own deposits + every descendant's, sorted by date.
+    const rolled: Contribution[] = [...own];
+    for (const k of kids) rolled.push(...k.contributions);
+    rolled.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
+
+    const ownTargetCents = row.targetCents;
+    const targetCents = hasChildren
+      ? kids.reduce((s, k) => s + k.targetCents, 0)
+      : ownTargetCents;
+    const savedCents = Math.max(0, rolled.reduce((s, c) => s + c.cents, 0));
+
+    return {
+      id: row.id, name: row.name, icon: row.icon, accent: accentOf(row.accent),
+      parentId: row.parent_id ?? null,
+      ownTargetCents, targetCents,
+      deadline: row.deadline, note: row.note, position: row.position,
+      createdAt: row.createdAt, updatedAt: row.updatedAt,
+      contributions: rolled, savedCents,
+      children: kids, hasChildren,
+    };
+  };
+
+  return (childrenOf.get(null) ?? []).map(build);
 }
 
-export function getGoal(id: string): Goal | null {
-  return listGoals().find((g) => g.id === id) ?? null;
+export function getGoalFlat(id: string): GoalRow | undefined {
+  return getDb().prepare(`SELECT * FROM goals WHERE id = ?`).get(id) as GoalRow | undefined;
+}
+
+/** True when a goal has at least one sub-goal (parents don't take direct deposits). */
+export function goalHasChildren(id: string): boolean {
+  const row = getDb().prepare(`SELECT 1 FROM goals WHERE parent_id = ? LIMIT 1`).get(id);
+  return Boolean(row);
 }
 
 // --- goals -------------------------------------------------------------------
 
 export interface GoalInput {
   name?: unknown; icon?: unknown; accent?: unknown;
-  targetCents?: unknown; deadline?: unknown; note?: unknown; position?: unknown;
+  targetCents?: unknown; deadline?: unknown; note?: unknown;
+  position?: unknown; parentId?: unknown;
 }
 
 export function createGoal(input: GoalInput): Goal | null {
   const name = trimmed(input.name);
   if (!name) return null;
+
+  // Optional parent — must exist. (New node → no cycle possible.)
+  let parentId: string | null = null;
+  if (input.parentId !== undefined && input.parentId !== null && trimmed(input.parentId) !== "") {
+    const pid = trimmed(input.parentId);
+    if (!getDb().prepare(`SELECT 1 FROM goals WHERE id = ?`).get(pid)) return null;
+    parentId = pid;
+  }
+
   const now = new Date().toISOString();
-  const row: GoalRow = {
-    id: randomUUID(), name,
+  const id = randomUUID();
+  const row = {
+    id, name,
     icon: trimmed(input.icon) || "🎯",
     accent: accentOf(input.accent),
     targetCents: Math.max(0, intCents(input.targetCents)),
     deadline: isoDateOrNull(input.deadline),
     note: trimmed(input.note),
-    position: nextGoalPosition(),
-    createdAt: now, updatedAt: now,
+    position: nextGoalPosition(parentId),
+    createdAt: now, updatedAt: now, parent_id: parentId,
   };
   getDb()
-    .prepare(`INSERT INTO goals (id,name,icon,accent,targetCents,deadline,note,position,createdAt,updatedAt)
-              VALUES (@id,@name,@icon,@accent,@targetCents,@deadline,@note,@position,@createdAt,@updatedAt)`)
+    .prepare(`INSERT INTO goals (id,name,icon,accent,targetCents,deadline,note,position,createdAt,updatedAt,parent_id)
+              VALUES (@id,@name,@icon,@accent,@targetCents,@deadline,@note,@position,@createdAt,@updatedAt,@parent_id)`)
     .run(row);
   return {
-    ...row, accent: accentOf(row.accent) as AccentKey,
-    contributions: [], savedCents: 0,
+    id, name, icon: row.icon, accent: accentOf(row.accent) as AccentKey,
+    parentId, ownTargetCents: row.targetCents, targetCents: row.targetCents,
+    deadline: row.deadline, note: row.note, position: row.position,
+    createdAt: now, updatedAt: now,
+    contributions: [], savedCents: 0, children: [], hasChildren: false,
   };
 }
 
 export function updateGoal(id: string, patch: GoalInput): boolean {
-  const existing = getDb().prepare(`SELECT * FROM goals WHERE id = ?`).get(id) as GoalRow | undefined;
+  const existing = getGoalFlat(id);
   if (!existing) return false;
   const next = {
     id,
@@ -182,8 +245,28 @@ export function updateGoal(id: string, patch: GoalInput): boolean {
   return true;
 }
 
+/** Delete a goal and its entire subtree (contributions cascade per subtree). */
 export function deleteGoal(id: string): boolean {
-  return getDb().prepare(`DELETE FROM goals WHERE id = ?`).run(id).changes > 0;
+  const db = getDb();
+  if (!db.prepare(`SELECT 1 FROM goals WHERE id = ?`).get(id)) return false;
+
+  const childrenStmt = db.prepare(`SELECT id FROM goals WHERE parent_id = ?`);
+  const collect = (root: string): string[] => {
+    const acc = [root];
+    for (const { id: kid } of childrenStmt.all(root) as { id: string }[]) {
+      acc.push(...collect(kid));
+    }
+    return acc;
+  };
+
+  const del = db.prepare(`DELETE FROM goals WHERE id = ?`);
+  const tx = db.transaction((ids: string[]) => {
+    // children first isn't required (contributions cascade per row), but delete
+    // leaves-up to keep FK checks happy under any pragma state.
+    for (const gid of ids.reverse()) del.run(gid);
+  });
+  tx(collect(id));
+  return true;
 }
 
 // --- contributions -----------------------------------------------------------
@@ -192,11 +275,18 @@ export interface ContributionInput {
   cents?: unknown; note?: unknown; occurredAt?: unknown;
 }
 
-export function addContribution(goalId: string, input: ContributionInput): Contribution | null {
-  const goal = getDb().prepare(`SELECT id FROM goals WHERE id = ?`).get(goalId);
-  if (!goal) return null;
+export type AddContributionResult =
+  | { ok: true; contribution: Contribution }
+  | { ok: false; reason: "not_found" | "has_children" | "zero" };
+
+export function addContribution(goalId: string, input: ContributionInput): AddContributionResult {
+  const goal = getGoalFlat(goalId);
+  if (!goal) return { ok: false, reason: "not_found" };
+  // Deposits only land on leaf goals — a parent's total rolls up from its children.
+  if (goalHasChildren(goalId)) return { ok: false, reason: "has_children" };
   const cents = intCents(input.cents);
-  if (cents === 0) return null; // a zero-dollar move is a no-op
+  if (cents === 0) return { ok: false, reason: "zero" };
+
   const now = new Date();
   const row: ContribRow = {
     id: randomUUID(), goal_id: goalId, cents,
@@ -208,9 +298,8 @@ export function addContribution(goalId: string, input: ContributionInput): Contr
     .prepare(`INSERT INTO contributions (id,goal_id,cents,note,occurredAt,createdAt)
               VALUES (@id,@goal_id,@cents,@note,@occurredAt,@createdAt)`)
     .run(row);
-  // Touch the parent goal so its updatedAt reflects the latest activity.
   getDb().prepare(`UPDATE goals SET updatedAt = ? WHERE id = ?`).run(row.createdAt, goalId);
-  return toContribution(row);
+  return { ok: true, contribution: toContribution(row) };
 }
 
 export function deleteContribution(id: string): boolean {
@@ -218,9 +307,9 @@ export function deleteContribution(id: string): boolean {
 }
 
 // --- waterfall allocation ----------------------------------------------------
-// Apply a set of {goalId, cents} moves atomically (one dated batch). Used by the
-// "distribute a lump sum" flow; the split itself is computed client-side so the
-// preview the user confirms is exactly what gets written.
+// Apply a set of {goalId, cents} moves atomically (one dated batch). The split is
+// computed client-side over LEAF goals so the preview the user confirms is exactly
+// what gets written; here we just persist, skipping any non-leaf targets.
 
 export interface AllocationLine { goalId: string; cents: number }
 
@@ -243,12 +332,14 @@ export function applyAllocation(
      VALUES (@id,@goal_id,@cents,@note,@occurredAt,@createdAt)`,
   );
   const goalExists = db.prepare(`SELECT id FROM goals WHERE id = ?`);
+  const hasKids = db.prepare(`SELECT 1 FROM goals WHERE parent_id = ? LIMIT 1`);
   const touch = db.prepare(`UPDATE goals SET updatedAt = ? WHERE id = ?`);
 
   const tx = db.transaction((rows: AllocationLine[]) => {
     const created: Contribution[] = [];
     for (const l of rows) {
       if (!goalExists.get(l.goalId)) continue;
+      if (hasKids.get(l.goalId)) continue; // never deposit into a parent
       const row: ContribRow = {
         id: randomUUID(), goal_id: l.goalId, cents: l.cents, note,
         occurredAt, createdAt: now.toISOString(),

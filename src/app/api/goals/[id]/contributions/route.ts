@@ -17,12 +17,14 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   } catch {
     return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
   }
-  const contribution = addContribution(id, payload);
-  if (!contribution) {
-    return NextResponse.json(
-      { error: "goal not found, or amount was zero" },
-      { status: 400 },
-    );
+  const result = addContribution(id, payload);
+  if (!result.ok) {
+    const msg =
+      result.reason === "not_found" ? "goal not found"
+      : result.reason === "has_children" ? "this goal has sub-goals — deposit into one of them instead"
+      : "amount was zero";
+    const status = result.reason === "not_found" ? 404 : 400;
+    return NextResponse.json({ error: msg }, { status });
   }
-  return NextResponse.json({ contribution }, { status: 201 });
+  return NextResponse.json({ contribution: result.contribution }, { status: 201 });
 }
