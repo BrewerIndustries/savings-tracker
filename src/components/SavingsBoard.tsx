@@ -240,7 +240,44 @@ export default function SavingsBoard() {
     return <div className="p-10 text-center" style={{ color: "var(--muted)" }}>Loading your goals…</div>;
   }
 
+  const overallPct = Math.round(totals.progress * 100);
+
   return (
+    <>
+      {/* Sticky overall-progress bar — stays pinned while you scroll the goals. */}
+      <div
+        className="sticky top-0 z-40"
+        style={{
+          background: "color-mix(in srgb, var(--card) 92%, transparent)",
+          backdropFilter: "saturate(1.1) blur(6px)",
+          borderBottom: "1px solid var(--line)",
+        }}
+      >
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-2.5 flex items-center gap-3">
+          <span className="text-sm font-semibold shrink-0" style={{ color: "var(--ink)" }}>
+            🌡️ All goals
+          </span>
+          <div
+            className="relative flex-1 rounded-full overflow-hidden"
+            style={{ height: 10, background: "#eceae2", border: "1px solid #e0ded4" }}
+            role="progressbar"
+            aria-valuenow={overallPct}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label="Overall savings progress"
+          >
+            <div
+              className="bar-fill absolute left-0 top-0 bottom-0 rounded-full"
+              style={{ width: `${Math.min(100, totals.progress * 100)}%`, background: "#1F8A5B" }}
+            />
+          </div>
+          <span className="text-sm font-semibold shrink-0 tabular-nums" style={{ color: "var(--muted)" }}>
+            <span className="hidden sm:inline">{formatMoney(totals.saved)} / {formatMoney(totals.target)} · </span>
+            <span style={{ color: "#1F8A5B" }}>{overallPct}%</span>
+          </span>
+        </div>
+      </div>
+
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
       <header className="flex flex-wrap items-center gap-3 mb-6">
         <div className="flex-1 min-w-[200px]">
@@ -359,6 +396,7 @@ export default function SavingsBoard() {
         />
       )}
     </div>
+    </>
   );
 }
 
