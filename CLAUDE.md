@@ -20,6 +20,14 @@ app family under `~/Desktop/Jarvis Server Applications/`.
 - UI: `GoalNode` in `SavingsBoard.tsx` is recursive — parents show a rollup thermometer +
   "Add sub-goal" and NO deposit box; leaves show the deposit box + history. Waterfall
   `computeSplit` runs over `leafGoals()`.
+- **Drag reorder** (`@dnd-kit`): one `DndContext` at the board; the top-level grid is a
+  `SortableContext` (rect strategy) and each parent wraps its children in a `SortableContext`
+  (vertical). Every `GoalNode` is a `useSortable` item with a ⠿ handle. `onDragEnd` only
+  reorders when active+over share a parent (no re-parent via drag), then optimistically
+  reorders local state and persists via `POST /api/reorder` ({parentId, orderedIds}) →
+  `reorderGoals()` rewrites `position` 0..n-1 in one txn (guarded by `parent_id IS @pid`).
+- **Scrollable**: sub-goals container is `max-height + overflow-y:auto` (460 top / 320 nested),
+  history list capped at 200px — cards scroll internally instead of expanding.
 
 ## Key files
 - `src/lib/db.ts` — schema + CRUD + `applyAllocation()` (atomic multi-goal write).
